@@ -47,6 +47,9 @@ if(UNIX)
     )
 endif()
 
+
+
+
 # -----------------------------------------------------------------------------
 # Conan Install + Integration
 # -----------------------------------------------------------------------------
@@ -150,6 +153,7 @@ set(STUB_ANALYTICS_PLUGIN_SRC_DIR ${CMAKE_CURRENT_LIST_DIR}/src)
 file(GLOB_RECURSE STUB_ANALYTICS_PLUGIN_SRC CONFIGURE_DEPENDS ${STUB_ANALYTICS_PLUGIN_SRC_DIR}/*)
 
 add_library(stub_analytics_plugin SHARED ${STUB_ANALYTICS_PLUGIN_SRC})
+find_package(OpenVINO REQUIRED)
 target_include_directories(stub_analytics_plugin PRIVATE ${STUB_ANALYTICS_PLUGIN_SRC_DIR})
 
 target_link_libraries(stub_analytics_plugin
@@ -157,6 +161,7 @@ target_link_libraries(stub_analytics_plugin
         nx_kit
         nx_sdk
         CONAN_PKG::opencv   # ✅ Use Conan OpenCV target
+        openvino::runtime
 )
 
 
