@@ -4,8 +4,8 @@
 #include "device_agent.h"
 #include "device_agent_manifest.h"
 #include "stub_analytics_plugin_object_detection_ini.h"
-
 #include <nx/kit/json.h>
+#include <cctype>
 
 namespace nx {
 namespace vms_server_plugins {
@@ -43,12 +43,35 @@ void Engine::doObtainDeviceAgent(Result<IDeviceAgent*>* outResult, const IDevice
     *outResult = new DeviceAgent(deviceInfo);
 }
 
+static std::string makeCaption(const std::string& objectTypeId)
+{
+    std::string name = objectTypeId;
+
+    // Remove prefix nx.base.
+    const std::string prefix = "nx.base.";
+    if (name.rfind(prefix, 0) == 0)
+        name = name.substr(prefix.length());
+
+    // Insert spaces before capital letters
+    std::string caption;
+    for (size_t i = 0; i < name.size(); ++i)
+    {
+        if (i > 0 && std::isupper(name[i]))
+            caption += " ";
+
+        caption += name[i];
+    }
+
+    return caption;
+}
+
 std::string Engine::manifestString() const
 {
     using namespace nx::kit;
 
     std::string errors;
-    Json deviceAgentManifest = Json::parse(kDeviceAgentManifest, errors).object_items();
+    Json deviceAgentManifest = Json::parse(kDeviceAgentManifest, errors);
+
 
     Json::array generationSettings;
 
@@ -70,13 +93,12 @@ std::string Engine::manifestString() const
 
     // generationSettings.push_back(std::move(attributesSetting));
 
-
     // Change
     Json::object modelPathSetting = {
         {"type", "TextField"},
         {"name", DeviceAgent::kModelPathSetting},
         {"caption", "Model file path"},
-        {"defaultValue", "/opt/networkoptix/mediaserver/bin/plugins/stub_analytics_plugin/models/yolov5s.onnx"}
+        {"defaultValue", "/opt/networkoptix/mediaserver/bin/plugins/stub_analytics_plugin/models/openvino/yolov5su.xml"}
     };
     generationSettings.push_back(std::move(modelPathSetting));
     Json::object classesPathSetting = {
@@ -112,8 +134,8 @@ std::string Engine::manifestString() const
     Json::object useGpuSetting = {
         {"type", "CheckBox"},
         {"name", DeviceAgent::kUseGpuSetting},
-        {"caption", "Use GPU (CUDA)"},
-        {"description", "Enable GPU acceleration for inference (requires CUDA-enabled OpenCV)"},
+        {"caption", "Use GPU acceleration"},
+        {"description", "Use OpenVINO GPU device if available (Intel GPU recommended)"},
         {"defaultValue", false}
     };
     generationSettings.push_back(std::move(useGpuSetting));
@@ -147,14 +169,20 @@ std::string Engine::manifestString() const
 
     generationSettings.push_back(Json::object{ {"type", "Separator"} });
 
+    // generationSettings.push_back(Json::object{
+    //     {"type", "Label"},
+    //     {"text", "Object Types To Detect"}
+    // });
+
     // for (const auto& supportedType : deviceAgentManifest["supportedTypes"].array_items())
     // {
     //     Json::object supportedTypeObject = supportedType.object_items();
     //     const std::string& objectTypeId = supportedTypeObject["objectTypeId"].string_value();
+
     //     Json::object generationSetting = {
     //         {"type", "CheckBox"},
     //         {"name", DeviceAgent::kObjectTypeGenerationSettingPrefix + objectTypeId},
-    //         {"caption", objectTypeId},
+    //         {"caption", makeCaption(objectTypeId)},
     //         {
     //             "defaultValue",
     //             kObjectTypeIdsGeneratedByDefault.find(objectTypeId)

@@ -94,7 +94,7 @@ struct FrameData {
 DeviceAgent::DeviceAgent(const nx::sdk::IDeviceInfo* deviceInfo):
     ConsumingDeviceAgent(deviceInfo, /*enableOutput*/ true),
     m_fps(25.0f),
-    m_detectionFrequencyFps(5),
+    m_detectionFrequencyFps(1000),  // High value to trigger adaptive period calculation
     m_objectDetectionPeriod(5),
     m_exponentialBackoffPeriod(5.0f),
     m_maxExponentialBackoffPeriod(300.0f),
@@ -104,8 +104,8 @@ DeviceAgent::DeviceAgent(const nx::sdk::IDeviceInfo* deviceInfo):
     m_processingThreadRunning(false),
     m_terminateThread(false),
     // m_modelPath("/opt/networkoptix/mediaserver/bin/plugins/stub_analytics_plugin/models/yolov5s.onnx"),
-    m_modelPath(""),
-    m_classesPath(""),
+    m_modelPath("/opt/networkoptix/mediaserver/bin/plugins/stub_analytics_plugin/models/openvino/yolov5su.xml"),
+    m_classesPath("/opt/networkoptix/mediaserver/bin/plugins/stub_analytics_plugin/models/classes.txt"),
     // m_classesPath("/opt/networkoptix/mediaserver/bin/plugins/stub_analytics_plugin/models/classes.txt"),
     m_confidenceThreshold(0.75f),
     m_nmsThreshold(0.45f),
@@ -220,12 +220,7 @@ float DeviceAgent::calculateImageQuality(const cv::Mat& image, const cv::Rect& b
         return 0.0f;
     
     // Extract ROI
-    cv::Rect safeBox(
-        std::max(0, box.x),
-        std::max(0, box.y),
-        std::min(box.width, image.cols - box.x),
-        std::min(box.height, image.rows - box.y)
-    );
+    cv::Rect safeBox = box & cv::Rect(0,0,image.cols,image.rows);
     
     if (safeBox.width <= 0 || safeBox.height <= 0)
         return 0.0f;
@@ -294,12 +289,13 @@ TrackMatchResult DeviceAgent::matchOrCreateTrack(
         if (quality > track.bestShotQuality)
         {
             // Extract and store cropped object image with safety checks
-            cv::Rect safeBox(
-                std::max(0, box.x),
-                std::max(0, box.y),
-                std::min(box.width, frame.cols - std::max(0, box.x)),
-                std::min(box.height, frame.rows - std::max(0, box.y))
-            );
+          
+            cv::Rect safeBox = box & cv::Rect(0, 0, frame.cols, frame.rows);
+            if (safeBox.width <= 0 || safeBox.height <= 0)
+            {
+                NX_PRINT << "Invalid safeBox after clipping";
+                return { track.trackId, false };
+            }
             
             // Verify box is valid
             if (safeBox.width > 0 && safeBox.height > 0 &&
@@ -338,12 +334,12 @@ TrackMatchResult DeviceAgent::matchOrCreateTrack(
         track.bestShotSent = false;
         
         // Store initial best shot with safety checks
-        cv::Rect safeBox(
-            std::max(0, box.x),
-            std::max(0, box.y),
-            std::min(box.width, frame.cols - std::max(0, box.x)),
-            std::min(box.height, frame.rows - std::max(0, box.y))
-        );
+        cv::Rect safeBox = box & cv::Rect(0, 0, frame.cols, frame.rows);
+        if (safeBox.width <= 0 || safeBox.height <= 0)
+        {
+            NX_PRINT << "Invalid safeBox after clipping";
+            return { track.trackId, false };
+        }
         
         // Verify box is valid
         if (safeBox.width > 0 && safeBox.height > 0 &&
@@ -387,35 +383,14 @@ void DeviceAgent::cleanupLostTracks()
     }
 }
 
-bool DeviceAgent::needToDetectObjects(const IUncompressedVideoFrame* videoFrame)
+// bool DeviceAgent::needToDetectObjects(const IUncompressedVideoFrame* videoFrame)
+// {
+//     return (m_frameIndex % m_objectDetectionPeriod == 0);
+// }
+
+bool DeviceAgent::needToDetectObjects(const IUncompressedVideoFrame*)
 {
-    if (m_frameIndex % m_objectDetectionPeriod != 0)
-        return false;
-
-    if (m_isExponentialBackoffActive)
-    {
-        if (m_frameIndex % static_cast<int>(m_exponentialBackoffPeriod) == 0)
-            return true;
-        return false;
-    }
-
-    const Ptr<IList<IMetadataPacket>> metadataPacketList = videoFrame->metadataList();
-    if (!metadataPacketList)
-        return true;
-
-    const int metadataPacketCount = metadataPacketList->count();
-    if (metadataPacketCount == 0)
-        return true;
-
-    for (int i = 0; i < metadataPacketCount; ++i)
-    {
-        const auto metadataPacket = metadataPacketList->at(i);
-        const auto motionPacket = metadataPacket->queryInterface<IMotionMetadataPacket>();
-        if (motionPacket && !motionPacket->isEmpty())
-            return true;
-    }
-
-    return false;
+    return true;
 }
 
 void DeviceAgent::updateFpsAndDetectionPeriod(int64_t timestampUs)
@@ -495,16 +470,16 @@ bool DeviceAgent::pushUncompressedVideoFrame(const IUncompressedVideoFrame* vide
     
     // CRITICAL: Clone the frame data immediately before returning
     cv::Mat frame(height, width, CV_8UC3, const_cast<void*>(frameData), stride);
-    cv::Mat frameCopy = frame.clone();  // Make a copy we own
+    cv::Mat frameCopy;
+    frame.copyTo(frameCopy);
     
     // Queue for async processing
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);
         
-        // Drop old frames if queue is full (prevents lag buildup)
-        if (m_frameQueue.size() >= 2)
+        // Always keep ONLY the latest frame (real-time behavior)
+        while (!m_frameQueue.empty())
         {
-            NX_PRINT << "Frame queue full, dropping old frame";
             m_frameQueue.pop();
         }
         
@@ -527,7 +502,7 @@ void DeviceAgent::processingThreadFunc()
 {
     NX_PRINT << "Processing thread started";
     
-    while (m_processingThreadRunning)
+    while (!m_terminateThread)
     {
         FrameData frameData;
         
@@ -758,75 +733,13 @@ void DeviceAgent::processFrameAsync(const FrameData& frameData)
         }
     }
 
-    // Exponential backoff logic
-    if (m_isExponentialBackoffActive)
-    {
-        if (boxes.empty())
-        {
-            if (frameData.frameIndex % static_cast<int>(m_exponentialBackoffPeriod) == 0 &&
-                m_exponentialBackoffPeriod < m_maxExponentialBackoffPeriod)
-            {
-                m_exponentialBackoffPeriod *= 1.1f;
-            }
-        }
-        else
-        {
-            m_exponentialBackoffPeriod = static_cast<float>(m_objectDetectionPeriod);
-            m_isExponentialBackoffActive = false;
-        }
-    }
-    else
-    {
-        m_isExponentialBackoffActive = boxes.empty();
-    }
+    // Real-time mode: never backoff detection
+    m_isExponentialBackoffActive = false;
 
     if (!boxes.empty())
         NX_PRINT << "Detected " << boxes.size() << " objects";
 
-    // DEBUG: Draw bounding boxes on frame and save occasionally for verification
-    static int debugFrameCount = 0;
-    if (!boxes.empty() && debugFrameCount % 100 == 0)
-    {
-        try {
-            cv::Mat debugFrame = frame.clone();
-            for (size_t i = 0; i < boxes.size(); ++i)
-            {
-                const auto& box = boxes[i];
-                std::string label = (classIds[i] < classNames.size()) ? classNames[classIds[i]] : "unknown";
-                label += " " + std::to_string(static_cast<int>(confidences[i] * 100)) + "%";
-                
-                // Draw rectangle
-                cv::rectangle(debugFrame, box, cv::Scalar(0, 255, 0), 2);
-                
-                // Draw label background
-                int baseline = 0;
-                cv::Size textSize = cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseline);
-                cv::rectangle(debugFrame, 
-                    cv::Point(box.x, box.y - textSize.height - 5),
-                    cv::Point(box.x + textSize.width, box.y),
-                    cv::Scalar(0, 255, 0), -1);
-                
-                // Draw label text
-                cv::putText(debugFrame, label, 
-                    cv::Point(box.x, box.y - 5),
-                    cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
-            }
-            
-            // Try to save debug frame (will fail silently if no write permission)
-            std::string debugPath = "/tmp/nx_detection_debug_" + std::to_string(frameData.frameIndex) + ".jpg";
-            // Note: This might fail due to JPEG codec, but won't crash - just for debugging
-            try {
-                cv::imwrite(debugPath, debugFrame);
-                NX_PRINT << "Saved debug frame to: " << debugPath;
-            } catch (...) {
-                // Silently ignore if save fails
-            }
-        } catch (...) {
-            // Ignore debug drawing errors
-        }
-    }
-    debugFrameCount++;
-
+   
     // Create metadata packet
     auto packet = makePtr<ObjectMetadataPacket>();
     packet->setTimestampUs(frameData.timestampUs);
@@ -868,7 +781,7 @@ void DeviceAgent::processFrameAsync(const FrameData& frameData)
 
             std::string cocoClassName = normalizeClassName(classNames[classIds[i]]);
 
-            NX_PRINT << "Normalized COCO [" << cocoClassName << "]";
+            // NX_PRINT << "Normalized COCO [" << cocoClassName << "]";
 
             // // convert to lowercase
             // std::transform(
@@ -879,11 +792,11 @@ void DeviceAgent::processFrameAsync(const FrameData& frameData)
             // );
 
             std::string nxType = mapCocoClassToNxType(cocoClassName);
-            NX_PRINT << "mapCocoClassToNxType: "<< nxType;
+            // NX_PRINT << "mapCocoClassToNxType: "<< nxType;
 
              // Log every detection
-            NX_PRINT << "Raw detection: " << cocoClassName << " -> " << nxType 
-                     << " @ confidence " << confidences[i];
+            // NX_PRINT << "Raw detection: " << cocoClassName << " -> " << nxType 
+                    //  << " @ confidence " << confidences[i];
     
 
             // FILTER 1: Skip unknown objects
@@ -901,10 +814,16 @@ void DeviceAgent::processFrameAsync(const FrameData& frameData)
             // }
 
             
-            // // FILTER 2: Only persons (OPTIONAL - comment out to detect all known types)
-            // if (nxType != "nx.base.Person")
+            // FILTER 2: Only persons (OPTIONAL - comment out to detect all known types)
+            if (nxType != "nx.base.Person")
+            {
+                NX_PRINT << "  -> SKIP: Not a Person";
+                continue;
+            }
+
+            // if (m_enabledObjectTypes.find(nxType) == m_enabledObjectTypes.end())
             // {
-            //     NX_PRINT << "  -> SKIP: Not a Person";
+            //     NX_PRINT << "  -> SKIP: Disabled type " << nxType;
             //     continue;
             // }
 
@@ -912,27 +831,24 @@ void DeviceAgent::processFrameAsync(const FrameData& frameData)
             // FILTER 3: Check region ONLY if explicitly enabled
             if (m_useDetectionRegion)
             {
-                NX_PRINT << "  -> Checking detection region (enabled)...";
+                // NX_PRINT << "  -> Checking detection region (enabled)...";
                 if (!isBoxInRegion(box, width, height))
                 {
-                    NX_PRINT << "  -> SKIP: Outside detection region";
+                    // NX_PRINT << "  -> SKIP: Outside detection region";
                     continue;
                 }
-                NX_PRINT << "  -> PASS: Inside detection region";
+                // NX_PRINT << "  -> PASS: Inside detection region";
             }
-            else
-            {
-                NX_PRINT << "  -> Detection region check SKIPPED (disabled)";
-            }
+           
             
-            NX_PRINT << "  -> ACCEPT: Adding to metadata packet";
+            // NX_PRINT << "  -> ACCEPT: Adding to metadata packet";
 
             // Track with PIXEL coordinates (not normalized)
             auto result = matchOrCreateTrack(box, nxType, frameData.timestampUs, frame, confidences[i]);
             Uuid trackId = result.trackId;
             currentFrameTrackIds.push_back(trackId);
 
-            NX_PRINT << "Event Emitting Starting!";
+            // NX_PRINT << "Event Emitting Starting!";
 
             // if (result.isNew)
             // {
@@ -961,8 +877,8 @@ void DeviceAgent::processFrameAsync(const FrameData& frameData)
             {
                 if (now - it->lastEventTimestampUs >= kEventIntervalUs)
                 {
-                    NX_PRINT << "Emitting periodic event for track " 
-                            << nxType << " (" << trackId << ")";
+                    if(frameData.frameIndex % 100 == 0)
+                        NX_PRINT << "Emitting periodic event";
 
                     emitObjectDetectedEvent(
                         cocoClassName,
@@ -974,7 +890,7 @@ void DeviceAgent::processFrameAsync(const FrameData& frameData)
                     it->lastEventTimestampUs = now;
                 }
             }
-            NX_PRINT << "Event Emitting Finished!";
+            // NX_PRINT << "Event Emitting Finished!";
 
             auto object = makePtr<ObjectMetadata>();
             object->setTypeId(nxType);
@@ -1001,9 +917,11 @@ void DeviceAgent::processFrameAsync(const FrameData& frameData)
             m_lastTrackCleanupFrame = frameData.frameIndex;
         }
 
-        pushMetadataPacket(packet.releasePtr());
-
-        
+        if(packet->count() > 0)
+        {
+            pushMetadataPacket(packet.releasePtr());
+        }
+                
         // Send best shot packets for newly detected tracks
         for (const Uuid& trackId : currentFrameTrackIds)
         {
@@ -1276,6 +1194,46 @@ bool DeviceAgent::isBoxInRegion(const cv::Rect& box, int frameWidth, int frameHe
     return inside;
 }
 
+void DeviceAgent::restartInferencePipeline()
+{
+    NX_PRINT << "Restarting inference pipeline";
+
+    // Stop processing thread
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        m_terminateThread = true;
+        m_queueCondition.notify_all();
+    }
+
+    if (m_processingThread.joinable())
+        m_processingThread.join();
+
+    // Clear queue
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        std::queue<FrameData> empty;
+        std::swap(m_frameQueue, empty);
+    }
+
+    // Reset OpenVINO objects
+    m_ovInferRequest = {};
+    m_ovModel = {};
+
+    // Reload model
+    loadModel();
+
+    // Restart thread
+    m_terminateThread = false;
+    m_processingThreadRunning = true;
+
+    m_processingThread = std::thread(
+        &DeviceAgent::processingThreadFunc,
+        this
+    );
+
+    NX_PRINT << "Inference pipeline restarted successfully";
+}
+
 nx::sdk::Result<const nx::sdk::ISettingsResponse*> DeviceAgent::settingsReceived()
 {
     const std::lock_guard<std::mutex> lock(m_settingsMutex);
@@ -1295,6 +1253,8 @@ nx::sdk::Result<const nx::sdk::ISettingsResponse*> DeviceAgent::settingsReceived
     // FIRST PASS: Parse all settings and store them
     bool checkboxEnabled = false;
     std::string polygonValue;
+
+    m_enabledObjectTypes.clear();
     
     for (const auto& entry: settings)
     {
@@ -1343,6 +1303,17 @@ nx::sdk::Result<const nx::sdk::ISettingsResponse*> DeviceAgent::settingsReceived
             m_objectDetectionPeriod = calcObjectDetectionPeriod();
             m_exponentialBackoffPeriod = static_cast<float>(m_objectDetectionPeriod);
         }
+        else if (startsWith(key, kObjectTypeGenerationSettingPrefix))
+        {
+            std::string objectTypeId =
+                key.substr(kObjectTypeGenerationSettingPrefix.size());
+
+            if (toBool(value))
+            {
+                m_enabledObjectTypes.insert(objectTypeId);
+                NX_PRINT << "Enabled object type: " << objectTypeId;
+            }
+        }
     }
     
     // SECOND PASS: Process polygon AFTER we know the checkbox state
@@ -1383,7 +1354,7 @@ nx::sdk::Result<const nx::sdk::ISettingsResponse*> DeviceAgent::settingsReceived
     if (m_modelPath != oldModelPath || m_classesPath != oldClassesPath || m_confidenceThreshold != oldConfidenceThreshold)
     {
         NX_PRINT << "Settings Changed, reloading model...";
-        loadModel();
+        restartInferencePipeline();
     }
     else
     {
@@ -1403,20 +1374,24 @@ Uuid DeviceAgent::trackIdByTrackIndex(int trackIndex)
 
 void DeviceAgent::loadModel()
 {
+    std::lock_guard<std::mutex> lock(m_modelMutex);
     classNames.clear();
 
-    std::string modelPath = "/opt/networkoptix/mediaserver/bin/plugins/stub_analytics_plugin/models/yolov5s.onnx";
-    std::string classesPath = "/opt/networkoptix/mediaserver/bin/plugins/stub_analytics_plugin/models/classes.txt";
+    // std::string modelPath = "/opt/networkoptix/mediaserver/bin/plugins/stub_analytics_plugin/models/yolov5s.onnx";
+    // std::string classesPath = "/opt/networkoptix/mediaserver/bin/plugins/stub_analytics_plugin/models/classes.txt";
 
-    NX_PRINT << "Attempting to load model from: " << m_modelPath;
-    NX_PRINT << "Attempting to load classes from: " << m_classesPath;
-    NX_PRINT << "Using " << (m_useGpu ? "GPU" : "CPU") << " for inference";
+    // NX_PRINT << "Attempting to load model from: " << m_modelPath;
+    // NX_PRINT << "Attempting to load classes from: " << m_classesPath;
+    // NX_PRINT << "Using " << (m_useGpu ? "GPU" : "CPU") << " for inference";
 
     // NX_PRINT << "Settings Recieved - modelPath: " << m_modelPath
     //          << ", classesPath: " << m_classesPath
     //          << ", confidenceThreshold: " << m_confidenceThreshold
     //          << ", nmsThreshold: " << m_nmsThreshold
     //          << ", detectionFrequencyFps: " << m_detectionFrequencyFps;
+
+    NX_PRINT << "Loading model: " << m_modelPath;
+    NX_PRINT << "Loading classes: " << m_classesPath;
 
     try
     {
@@ -1432,7 +1407,7 @@ void DeviceAgent::loadModel()
         if (!classFile.good())
         {
             NX_PRINT << "ERROR: Classes file not found at " << m_classesPath;
-            return;
+            return; 
         }
 
         std::string line;
@@ -1450,174 +1425,140 @@ void DeviceAgent::loadModel()
         
         NX_PRINT << "Loaded " << classNames.size() << " class names";
 
-        yoloNet = cv::dnn::readNetFromONNX(modelPath);
-
-
-        // yoloNet.setPreferableBackend(cv::dnn::DNN_BACKEND_OPENCV);
-        // yoloNet.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
+        // yoloNet = cv::dnn::readNetFromONNX(modelPath);
+        // std::string xmlPath = "/opt/networkoptix/mediaserver/bin/plugins/stub_analytics_plugin/models/openvino/yolov5su.xml";
         
-        if (m_useGpu)
-        {
-            try {
-                yoloNet.setPreferableBackend(cv::dnn::DNN_BACKEND_CUDA);
-                yoloNet.setPreferableTarget(cv::dnn::DNN_TARGET_CUDA);
-                NX_PRINT << "GPU (CUDA) backend enabled";
-            } catch (const cv::Exception& e) {
-                NX_PRINT << "WARNING: Failed to set CUDA backend: " << e.what();
-                NX_PRINT << "Falling back to CPU";
-                yoloNet.setPreferableBackend(cv::dnn::DNN_BACKEND_OPENCV);
-                yoloNet.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
-                m_useGpu = false;  // Update flag to reflect actual state
-            }
-        }
-        else
-        {
-            yoloNet.setPreferableBackend(cv::dnn::DNN_BACKEND_OPENCV);
-            yoloNet.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
-            NX_PRINT << "CPU backend enabled";
-        }
+        NX_PRINT << "Loading OpenVINO model: " << m_modelPath;
 
-        if (yoloNet.empty())
-        {
-            NX_PRINT << "ERROR: YOLO network is empty after loading!";
-            return;
-        }
+        auto model = m_ovCore.read_model(m_modelPath);
+        std::string device = m_useGpu ? "AUTO" : "CPU";
+        m_ovModel = m_ovCore.compile_model(model, device);
 
-        NX_PRINT << "YOLO model loaded successfully!";
+        m_ovInferRequest = m_ovModel.create_infer_request();
+
+        // NX_PRINT << "OpenVINO device: " << m_ovModel.get_property(ov::device::full_name);
+
+        NX_PRINT << "OpenVINO model loaded successfully";
+
+        
     }
     catch (const std::exception& e)
     {
-        NX_PRINT << "EXCEPTION while loading YOLO model: " << e.what();
+        NX_PRINT << "EXCEPTION while loading OpenVINO model: " << e.what();
     }
 }
 
 std::vector<cv::Rect> DeviceAgent::runDetections(
-    const cv::Mat& frame, std::vector<int>& classIds, std::vector<float>& confidences)
+    const cv::Mat& frame,
+    std::vector<int>& classIds,
+    std::vector<float>& confidences)
 {
-    // float confThreshold = 0.75f;
-    // float nmsThreshold  = 0.45f;
-
-
-
-    float confThreshold = m_confidenceThreshold;
-    float nmsThreshold  = m_nmsThreshold;
-
+    std::lock_guard<std::mutex> lock(m_modelMutex);
     std::vector<cv::Rect> boxes;
     classIds.clear();
     confidences.clear();
 
-    try
+    float confThreshold = m_confidenceThreshold;
+    float nmsThreshold = m_nmsThreshold;
+
+    cv::Mat resized;
+    cv::resize(frame, resized, cv::Size(640,640));
+
+    cv::Mat blob;
+    cv::dnn::blobFromImage(resized, blob, 1.0/255.0, cv::Size(640,640), cv::Scalar(), true, false);
+
+    float* blobData = (float*)blob.data;
+
+    ov::Tensor inputTensor(
+        ov::element::f32,
+        {1,3,640,640},
+        blobData
+    );
+
+    m_ovInferRequest.set_input_tensor(inputTensor);
+
+    m_ovInferRequest.infer();
+
+    ov::Tensor output = m_ovInferRequest.get_output_tensor();
+
+    auto shape = output.get_shape();
+
+    int channels = shape[1];   // 84
+    int anchors = shape[2];    // 8400
+
+    const float* data = output.data<const float>();
+
+    float scaleX = frame.cols / 640.0f;
+    float scaleY = frame.rows / 640.0f;
+
+    std::vector<cv::Rect> tempBoxes;
+    std::vector<int> tempClassIds;
+    std::vector<float> tempConfidences;
+
+    for (int i = 0; i < anchors; i++)
     {
-        // Prepare blob
-        cv::Mat blob;
-        cv::dnn::blobFromImage(frame, blob, 1.0 / 255.0,
-            cv::Size(640, 640), cv::Scalar(), true, false);
+        float cx = data[0 * anchors + i];
+        float cy = data[1 * anchors + i];
+        float w  = data[2 * anchors + i];
+        float h  = data[3 * anchors + i];
 
-        yoloNet.setInput(blob);
+        float maxScore = 0.0f;
+        int classId = -1;
 
-        std::vector<cv::Mat> outputs;
-        yoloNet.forward(outputs, yoloNet.getUnconnectedOutLayersNames());
-
-        if (outputs.empty())
-            return boxes;
-// tub_analytics_plugin/models/classes.txt
-        cv::Mat output = outputs[0];
-        if (output.dims != 3)
-            return boxes;
-
-        int numDetections = output.size[1];
-        int numParams = output.size[2];
-
-        cv::Mat detections = output.reshape(1, numDetections);
-
-        std::vector<cv::Rect> tempBoxes;
-        std::vector<int> tempClassIds;
-        std::vector<float> tempConfidences;
-
-        int highConfCount = 0;
-
-        for (int i = 0; i < detections.rows; i++)
+        for (int c = 4; c < channels; c++)
         {
-            float confidence = detections.at<float>(i, 4);
+            float score = data[c * anchors + i];
 
-            if (confidence > confThreshold)
-                highConfCount++;
-
-            if (confidence > confThreshold)
+            if (score > maxScore)
             {
-                cv::Mat scores = detections.row(i).colRange(5, numParams);
-                cv::Point classIdPoint;
-                double maxClassScore;
-                cv::minMaxLoc(scores, 0, &maxClassScore, 0, &classIdPoint);
-
-                float combinedScore = confidence * maxClassScore;
-
-                if (combinedScore > confThreshold)
-                {
-                    // YOLOv5 raw coords in 640x640
-                    float cx = detections.at<float>(i, 0);
-                    float cy = detections.at<float>(i, 1);
-                    float w = detections.at<float>(i, 2);
-                    float h = detections.at<float>(i, 3);
-
-                    // scale to frame size
-                    float scaleX = float(frame.cols) / 640.0f;
-                    float scaleY = float(frame.rows) / 640.0f;
-
-                    float scaledCx = cx * scaleX;
-                    float scaledCy = cy * scaleY;
-                    float scaledW = w * scaleX;
-                    float scaledH = h * scaleY;
-
-                    int left = int(scaledCx - scaledW / 2);
-                    int top = int(scaledCy - scaledH / 2);
-                    int width = int(scaledW);
-                    int height = int(scaledH);
-
-                    // clamp
-                    left = std::max(0, std::min(left, frame.cols - 1));
-                    top  = std::max(0, std::min(top, frame.rows - 1));
-                    width = std::min(width, frame.cols - left);
-                    height = std::min(height, frame.rows - top);
-
-                    if (width > 0 && height > 0)
-                    {
-                        tempBoxes.emplace_back(left, top, width, height);
-                        tempClassIds.push_back(classIdPoint.x);
-                        tempConfidences.push_back(combinedScore);
-                    }
-                }
+                maxScore = score;
+                classId = c - 4;
             }
         }
 
-        NX_PRINT << "Candidates with conf > " << confThreshold << ": " << highConfCount;
+        float confidence = maxScore;
 
-        if (tempBoxes.empty())
-            return boxes;
+        if (confidence < confThreshold)
+            continue;
 
-        NX_PRINT << "Before NMS: " << tempBoxes.size() << " detections";
+        int left = int((cx - 0.5f * w) * scaleX);
+        int top  = int((cy - 0.5f * h) * scaleY);
+        int width = int(w * scaleX);
+        int height = int(h * scaleY);
 
-        std::vector<int> indices;
-        cv::dnn::NMSBoxes(tempBoxes, tempConfidences,
-                          confThreshold, nmsThreshold, indices);
+        if (width <= 0 || height <= 0)
+            continue;
 
-        NX_PRINT << "After NMS: " << indices.size() << " detections";
+        cv::Rect box(left, top, width, height);
+        box &= cv::Rect(0,0,frame.cols,frame.rows);
 
-        for (int idx : indices)
-        {
-            boxes.push_back(tempBoxes[idx]);
-            classIds.push_back(tempClassIds[idx]);
-            confidences.push_back(tempConfidences[idx]);
-        }
+        if(box.width <= 0 || box.height <= 0)
+            continue;
+
+        tempBoxes.push_back(box);
+        tempClassIds.push_back(classId);
+        tempConfidences.push_back(confidence);
     }
-    catch (const std::exception& e)
+
+    std::vector<int> indices;
+
+    cv::dnn::NMSBoxes(
+        tempBoxes,
+        tempConfidences,
+        confThreshold,
+        nmsThreshold,
+        indices
+    );
+
+    for(int idx : indices)
     {
-        NX_PRINT << "EXCEPTION in runDetections: " << e.what();
+        boxes.push_back(tempBoxes[idx]);
+        classIds.push_back(tempClassIds[idx]);
+        confidences.push_back(tempConfidences[idx]);
     }
 
     return boxes;
 }
-
 
 } // namespace object_detection
 } // namespace stub

@@ -1,11 +1,10 @@
 // device_agent.h - Updated header with async processing
 
 #pragma once
-
+#include <openvino/openvino.hpp>
 #include <nx/sdk/analytics/helpers/consuming_device_agent.h>
 #include <nx/sdk/helpers/uuid_helper.h>
 #include <opencv2/core.hpp>
-#include <opencv2/dnn.hpp>
 #include <thread>
 #include <queue>
 #include <mutex>
@@ -53,8 +52,13 @@ protected:
 private:
     // Frame counter
     int m_frameIndex = 0;
+    std::mutex m_modelMutex;
 
     std::string m_cameraId;
+
+    ov::Core m_ovCore;
+    ov::CompiledModel m_ovModel;
+    ov::InferRequest m_ovInferRequest;
 
 
     // Plugin Settings
@@ -63,6 +67,7 @@ private:
     float m_confidenceThreshold = 0.50f;
     float m_nmsThreshold = 0.45f;
     bool m_useGpu = false;
+    std::set<std::string> m_enabledObjectTypes;
     
     // Detection region polygon
     std::vector<cv::Point2f> m_detectionPolygon;  // Stores polygon points (normalized 0-1)
@@ -77,7 +82,7 @@ private:
     std::vector<nx::sdk::Uuid> m_trackIds;
     
     // OpenCV YOLO
-    cv::dnn::Net yoloNet;
+    // cv::dnn::Net yoloNet;
     std::vector<std::string> classNames;
     
     // Tracking
@@ -117,6 +122,7 @@ private:
     
     // Model loading and detection
     void loadModel();
+    void restartInferencePipeline();
     std::vector<cv::Rect> runDetections(
         const cv::Mat& frame,
         std::vector<int>& classIds,
@@ -176,6 +182,7 @@ public:
     static const std::string kDetectionRegionSetting;
     static const std::string kEnableDetectionRegionSetting;
     static const std::string kUseGpuSetting;
+    
 };
 
 } // namespace object_detection
