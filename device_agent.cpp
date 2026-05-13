@@ -104,7 +104,7 @@ DeviceAgent::DeviceAgent(const nx::sdk::IDeviceInfo* deviceInfo):
     m_processingThreadRunning(false),
     m_terminateThread(false),
     // m_modelPath("/opt/networkoptix/mediaserver/bin/plugins/stub_analytics_plugin/models/yolov5s.onnx"),
-    m_modelPath("/opt/networkoptix/mediaserver/bin/plugins/stub_analytics_plugin/models/openvino/yolov5su.xml"),
+    m_modelPath("/opt/networkoptix/mediaserver/bin/plugins/stub_analytics_plugin/models/openvino/yolov5s.xml"),
     m_classesPath("/opt/networkoptix/mediaserver/bin/plugins/stub_analytics_plugin/models/classes.txt"),
     // m_classesPath("/opt/networkoptix/mediaserver/bin/plugins/stub_analytics_plugin/models/classes.txt"),
     m_confidenceThreshold(0.75f),
