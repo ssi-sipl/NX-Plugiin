@@ -741,8 +741,8 @@ void DeviceAgent::processFrameAsync(const FrameData& frameData)
 
    
     // Create metadata packet
-    auto packet = makePtr<ObjectMetadataPacket>();
-    packet->setTimestampUs(frameData.timestampUs);
+    //auto packet = makePtr<ObjectMetadataPacket>();
+    //packet->setTimestampUs(frameData.timestampUs);
 
     // Process detections with tracking
     std::vector<Uuid> currentFrameTrackIds;
@@ -892,22 +892,22 @@ void DeviceAgent::processFrameAsync(const FrameData& frameData)
             }
             // NX_PRINT << "Event Emitting Finished!";
 
-            auto object = makePtr<ObjectMetadata>();
-            object->setTypeId(nxType);
-            object->setBoundingBox(Rect(x, y, w, h));  // Use normalized coordinates
-            object->setTrackId(trackId);
-            object->setConfidence(confidences[i]);
+            //auto object = makePtr<ObjectMetadata>();
+            //object->setTypeId(nxType);
+            //object->setBoundingBox(Rect(x, y, w, h));  // Use normalized coordinates
+            //object->setTrackId(trackId);
+            //object->setConfidence(confidences[i]);
             
             // DEBUG: Log bounding box info
-            if (frameData.frameIndex % 30 == 0)
-            {
-                NX_PRINT << "Object " << i << ": " << nxType 
-                         << " at (" << x << ", " << y << ", " << w << ", " << h << ")"
-                         << " pixel box: (" << box.x << ", " << box.y << ", " 
-                         << box.width << ", " << box.height << ")";
-            }
+            //if (frameData.frameIndex % 30 == 0)
+            //{
+              // NX_PRINT << "Object " << i << ": " << nxType 
+            //         << " at (" << x << ", " << y << ", " << w << ", " << h << ")"
+            //         << " pixel box: (" << box.x << ", " << box.y << ", " 
+            //         << box.width << ", " << box.height << ")";
+            //}
 
-            packet->addItem(object.get());
+            //packet->addItem(object.get());
         }
 
         // Clean up lost tracks periodically
@@ -917,10 +917,13 @@ void DeviceAgent::processFrameAsync(const FrameData& frameData)
             m_lastTrackCleanupFrame = frameData.frameIndex;
         }
 
-        if(packet->count() > 0)
-        {
-            pushMetadataPacket(packet.releasePtr());
-        }
+        // Do not send ObjectMetadataPacket to Nx.
+        // This prevents bounding boxes from appearing in the UI.
+
+       // if(packet->count() > 0)
+       // {
+       //     pushMetadataPacket(packet.releasePtr());
+       // }
                 
         // Send best shot packets for newly detected tracks
         for (const Uuid& trackId : currentFrameTrackIds)
@@ -941,14 +944,16 @@ void DeviceAgent::processFrameAsync(const FrameData& frameData)
                 );
 
                 // 🔥 Send to NX
-                sendBestShotPacket(
-                    trackId,
-                    it->bestShotImage,
-                    it->lastBox,
-                    frameData.timestampUs,
-                    width,
-                    height
-                );
+                // Do not send best shots to Nx UI.
+
+               // sendBestShotPacket(
+               //     trackId,
+               //     it->bestShotImage,
+               //     it->lastBox,
+               //     frameData.timestampUs,
+               //     width,
+               //     height
+               // );
 
                 it->bestShotSent = true;  // ✅ sent & saved ONCE
             }
