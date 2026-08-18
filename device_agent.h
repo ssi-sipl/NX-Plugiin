@@ -1,7 +1,7 @@
-// device_agent.h - Updated header with async processing
+// device_agent.h - Triton Inference Server version (replaces OpenVINO)
 
 #pragma once
-#include <openvino/openvino.hpp>
+#include "grpc_client.h"
 #include <nx/sdk/analytics/helpers/consuming_device_agent.h>
 #include <nx/sdk/helpers/uuid_helper.h>
 #include <opencv2/core.hpp>
@@ -13,7 +13,10 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <memory>
 #include <nx/kit/json.h>
+
+namespace tc = triton::client;
 
 namespace nx {
 namespace vms_server_plugins {
@@ -39,7 +42,7 @@ public:
 
 protected:
     virtual std::string manifestString() const override;
-    
+
     virtual bool pushUncompressedVideoFrame(
         const nx::sdk::analytics::IUncompressedVideoFrame* videoFrame) override;
 
@@ -56,53 +59,52 @@ private:
 
     std::string m_cameraId;
 
-    ov::Core m_ovCore;
-    ov::CompiledModel m_ovModel;
-    ov::InferRequest m_ovInferRequest;
-
+    // Triton Inference Server client (replaces ov::Core / ov::CompiledModel / ov::InferRequest)
+    std::unique_ptr<tc::InferenceServerGrpcClient> m_tritonClient;
+    std::string m_tritonUrl = "localhost:9001";       // confirmed gRPC port on host
+    std::string m_tritonModelName = "yolov8s_person"; // confirmed model name in Triton model repo
 
     // Plugin Settings
-    std::string m_modelPath;
+    std::string m_modelPath;     // legacy setting, no longer used to load a local model
     std::string m_classesPath;
     float m_confidenceThreshold = 0.50f;
     float m_nmsThreshold = 0.45f;
-    bool m_useGpu = false;
+    bool m_useGpu = false;       // legacy setting, no longer changes anything (Triton always uses GPU)
     std::set<std::string> m_enabledObjectTypes;
-    
+
     // Detection region polygon
     std::vector<cv::Point2f> m_detectionPolygon;  // Stores polygon points (normalized 0-1)
     bool m_useDetectionRegion;  // Flag to enable/disable region filtering
     std::mutex m_polygonMutex;  // Protect polygon access
-    
+
     // Settings
     std::mutex m_settingsMutex;
     std::set<std::string> m_objectTypeIdsToGenerate;
     bool m_sendAttributes = false;
     int m_timestampShiftMs = 0;
     std::vector<nx::sdk::Uuid> m_trackIds;
-    
-    // OpenCV YOLO
-    // cv::dnn::Net yoloNet;
+
+    // Class names loaded from classes.txt
     std::vector<std::string> classNames;
-    
+
     // Tracking
     std::mutex m_trackingMutex;
     std::vector<TrackedObject> m_trackedObjects;
-    
+
     // FPS and detection management
     float m_fps;
     int m_detectionFrequencyFps;
     int m_objectDetectionPeriod;
     int64_t m_fpsChangeTimestampUs;
-    
+
     // Exponential backoff
     float m_exponentialBackoffPeriod;
     float m_maxExponentialBackoffPeriod;
     bool m_isExponentialBackoffActive;
-    
+
     // Tracking cleanup
     int64_t m_lastTrackCleanupFrame;
-    
+
     // ASYNC PROCESSING - Critical for eliminating lag!
     std::thread m_processingThread;
     std::queue<FrameData> m_frameQueue;
@@ -115,11 +117,11 @@ private:
     void parseDetectionPolygon(const std::string& jsonValue);
     bool isPointInPolygon(const cv::Point2f& point, const std::vector<cv::Point2f>& polygon);
     bool isBoxInRegion(const cv::Rect& box, int frameWidth, int frameHeight);
-    
+
     // Thread function
     void processingThreadFunc();
     void processFrameAsync(const FrameData& frameData);
-    
+
     // Model loading and detection
     void loadModel();
     void restartInferencePipeline();
@@ -127,11 +129,11 @@ private:
         const cv::Mat& frame,
         std::vector<int>& classIds,
         std::vector<float>& confidences);
-    
+
     // Helper methods
     std::string mapCocoClassToNxType(const std::string& cocoClass);
     nx::sdk::Uuid trackIdByTrackIndex(int trackIndex);
-    
+
     // Tracking methods
     float calculateIoU(const cv::Rect& box1, const cv::Rect& box2);
     float calculateImageQuality(const cv::Mat& image, const cv::Rect& box);
@@ -142,7 +144,7 @@ private:
         const cv::Mat& frame,
         float confidence);
     void cleanupLostTracks();
-    
+
     // Best shot handling
     void sendBestShotPacket(
         const nx::sdk::Uuid& trackId,
@@ -151,7 +153,7 @@ private:
         int64_t timestampUs,
         int frameWidth,
         int frameHeight);
-    
+
     // Optimization methods
     bool needToDetectObjects(const nx::sdk::analytics::IUncompressedVideoFrame* videoFrame);
     void updateFpsAndDetectionPeriod(int64_t timestampUs);
@@ -162,7 +164,7 @@ private:
         float confidence,
         const nx::sdk::Uuid& trackId,
         int64_t timestampUs);
-    
+
     void saveBestShotToDisk(
         const cv::Mat& image,
         const std::string& className,
@@ -170,7 +172,7 @@ private:
         const nx::sdk::Uuid& trackId);
 
 
-    
+
 public:
     static const std::string kTimeShiftSetting;
     static const std::string kSendAttributesSetting;
@@ -182,7 +184,7 @@ public:
     static const std::string kDetectionRegionSetting;
     static const std::string kEnableDetectionRegionSetting;
     static const std::string kUseGpuSetting;
-    
+
 };
 
 } // namespace object_detection
