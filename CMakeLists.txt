@@ -7,6 +7,9 @@ project(stub_analytics_plugin)
 # Path to SDK
 set(metadataSdkDir "" CACHE PATH "Path to unpacked VMS Metadata SDK zip.")
 
+# Path to extracted Triton client SDK (from nvcr.io/nvidia/tritonserver:25.12-py3-sdk)
+set(tritonClientDir "" CACHE PATH "Path to extracted Triton client SDK install directory.")
+
 # -----------------------------------------------------------------------------
 # Conan Setup (Auto-download + configure)
 # -----------------------------------------------------------------------------
@@ -74,6 +77,17 @@ if(metadataSdkDir STREQUAL "")
     endif()
 endif()
 
+# -----------------------------------------------------------------------------
+# Triton client SDK validation
+# -----------------------------------------------------------------------------
+if(tritonClientDir STREQUAL "")
+    message(FATAL_ERROR "Define tritonClientDir cache variable to point to the extracted Triton client SDK (e.g. ~/triton_client).")
+endif()
+if(NOT EXISTS ${tritonClientDir}/include/grpc_client.h)
+    message(FATAL_ERROR "tritonClientDir does not contain include/grpc_client.h — check the extracted SDK path.")
+endif()
+message(STATUS "✅ Using Triton client SDK: ${tritonClientDir}")
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -134,16 +148,6 @@ set(CMAKE_EXE_LINKER_FLAGS " -static")
 # Link dependencies
 target_link_libraries(nx_sdk PRIVATE nx_kit)
 
-
-# target_link_libraries(opencv_object_detection_analytics_plugin
-# nx_kit
-# nx_sdk
-# opencv::core opencv::flann opencv::imgproc opencv::imgcodecs opencv::dnn opencv::opencv_dnn opencv::ml
-# opencv::plot opencv::opencv_features2d opencv::opencv_calib3d opencv::datasets opencv::video opencv::tracking
-#    -static-libgcc
-#    -static-libstdc++
-# )
-
 target_compile_definitions(nx_sdk PRIVATE NX_PLUGIN_API=${API_EXPORT_MACRO}) #< for nxLibContext()
 
 #--------------------------------------------------------------------------------------------------
@@ -153,26 +157,23 @@ set(STUB_ANALYTICS_PLUGIN_SRC_DIR ${CMAKE_CURRENT_LIST_DIR}/src)
 file(GLOB_RECURSE STUB_ANALYTICS_PLUGIN_SRC CONFIGURE_DEPENDS ${STUB_ANALYTICS_PLUGIN_SRC_DIR}/*)
 
 add_library(stub_analytics_plugin SHARED ${STUB_ANALYTICS_PLUGIN_SRC})
-find_package(OpenVINO REQUIRED)
-target_include_directories(stub_analytics_plugin PRIVATE ${STUB_ANALYTICS_PLUGIN_SRC_DIR})
+
+target_include_directories(stub_analytics_plugin PRIVATE
+    ${STUB_ANALYTICS_PLUGIN_SRC_DIR}
+    ${tritonClientDir}/include
+)
+
+target_link_directories(stub_analytics_plugin PRIVATE
+    ${tritonClientDir}/lib
+)
 
 target_link_libraries(stub_analytics_plugin
     PRIVATE
         nx_kit
         nx_sdk
         CONAN_PKG::opencv   # ✅ Use Conan OpenCV target
-        openvino::runtime
+        grpcclient          # ✅ Triton gRPC client (replaces openvino::runtime)
 )
-
-
-target_compile_definitions(stub_analytics_plugin
-    PRIVATE NX_PLUGIN_API=${API_EXPORT_MACRO}
-)
-
-if(NOT WIN32)
-    target_link_libraries(stub_analytics_plugin PRIVATE pthread)
-endif()
-
 
 target_compile_definitions(stub_analytics_plugin
     PRIVATE NX_PLUGIN_API=${API_EXPORT_MACRO}
