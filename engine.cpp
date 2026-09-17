@@ -98,7 +98,7 @@ std::string Engine::manifestString() const
         {"type", "TextField"},
         {"name", DeviceAgent::kModelPathSetting},
         {"caption", "Model file path"},
-        {"defaultValue", "/opt/networkoptix/mediaserver/bin/plugins/stub_analytics_plugin/models/openvino/yolov5su.xml"}
+        {"defaultValue", "/opt/networkoptix/mediaserver/bin/plugins/stub_analytics_plugin/models/openvino/yolov5s.xml"}
     };
     generationSettings.push_back(std::move(modelPathSetting));
     Json::object classesPathSetting = {

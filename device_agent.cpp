@@ -28,6 +28,7 @@
 #include <opencv2/dnn.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/highgui.hpp>
+#include <openvino/openvino.hpp>
 #include <fstream>
 
 namespace nx {
@@ -104,7 +105,7 @@ DeviceAgent::DeviceAgent(const nx::sdk::IDeviceInfo* deviceInfo):
     m_processingThreadRunning(false),
     m_terminateThread(false),
     // m_modelPath("/opt/networkoptix/mediaserver/bin/plugins/stub_analytics_plugin/models/yolov5s.onnx"),
-    m_modelPath("/opt/networkoptix/mediaserver/bin/plugins/stub_analytics_plugin/models/openvino/yolov5s.xml"),
+    m_modelPath("/opt/networkoptix/mediaserver/bin/plugins/stub_analytics_plugin/models/openvino/yolov8n.xml"),
     m_classesPath("/opt/networkoptix/mediaserver/bin/plugins/stub_analytics_plugin/models/classes.txt"),
     // m_classesPath("/opt/networkoptix/mediaserver/bin/plugins/stub_analytics_plugin/models/classes.txt"),
     m_confidenceThreshold(0.75f),
@@ -1454,6 +1455,7 @@ std::vector<cv::Rect> DeviceAgent::runDetections(
     std::vector<float>& confidences)
 {
     std::lock_guard<std::mutex> lock(m_modelMutex);
+
     std::vector<cv::Rect> boxes;
     classIds.clear();
     confidences.clear();
@@ -1462,29 +1464,36 @@ std::vector<cv::Rect> DeviceAgent::runDetections(
     float nmsThreshold = m_nmsThreshold;
 
     cv::Mat resized;
-    cv::resize(frame, resized, cv::Size(640,640));
+    cv::resize(frame, resized, cv::Size(640, 640));
 
     cv::Mat blob;
-    cv::dnn::blobFromImage(resized, blob, 1.0/255.0, cv::Size(640,640), cv::Scalar(), true, false);
-
-    float* blobData = (float*)blob.data;
+    cv::dnn::blobFromImage(
+        resized,
+        blob,
+        1.0 / 255.0,
+        cv::Size(640, 640),
+        cv::Scalar(),
+        true,
+        false
+    );
 
     ov::Tensor inputTensor(
         ov::element::f32,
-        {1,3,640,640},
-        blobData
+        {1, 3, 640, 640},
+        blob.data
     );
 
     m_ovInferRequest.set_input_tensor(inputTensor);
-
     m_ovInferRequest.infer();
 
     ov::Tensor output = m_ovInferRequest.get_output_tensor();
 
     auto shape = output.get_shape();
 
-    int channels = shape[1];   // 84
-    int anchors = shape[2];    // 8400
+    // YOLOv8 output: [1, 84, 8400]
+    // 84 = 4 box values + 80 COCO class scores
+    const int channels = shape[1];  // 84
+    const int anchors = shape[2];   // 8400
 
     const float* data = output.data<const float>();
 
@@ -1495,19 +1504,26 @@ std::vector<cv::Rect> DeviceAgent::runDetections(
     std::vector<int> tempClassIds;
     std::vector<float> tempConfidences;
 
-    for (int i = 0; i < anchors; i++)
+    for (int i = 0; i < anchors; ++i)
     {
-        float cx = data[0 * anchors + i];
-        float cy = data[1 * anchors + i];
-        float w  = data[2 * anchors + i];
-        float h  = data[3 * anchors + i];
+        // YOLOv8 output layout:
+        // channel 0 = cx
+        // channel 1 = cy
+        // channel 2 = width
+        // channel 3 = height
+        // channels 4-83 = 80 class scores
+
+        const float cx = data[0 * anchors + i];
+        const float cy = data[1 * anchors + i];
+        const float w = data[2 * anchors + i];
+        const float h = data[3 * anchors + i];
 
         float maxScore = 0.0f;
         int classId = -1;
 
-        for (int c = 4; c < channels; c++)
+        for (int c = 4; c < channels; ++c)
         {
-            float score = data[c * anchors + i];
+            const float score = data[c * anchors + i];
 
             if (score > maxScore)
             {
@@ -1516,23 +1532,35 @@ std::vector<cv::Rect> DeviceAgent::runDetections(
             }
         }
 
-        float confidence = maxScore;
+        const float confidence = maxScore;
 
         if (confidence < confThreshold)
             continue;
 
-        int left = int((cx - 0.5f * w) * scaleX);
-        int top  = int((cy - 0.5f * h) * scaleY);
-        int width = int(w * scaleX);
-        int height = int(h * scaleY);
+        int left = static_cast<int>(
+            (cx - 0.5f * w) * scaleX
+        );
+
+        int top = static_cast<int>(
+            (cy - 0.5f * h) * scaleY
+        );
+
+        int width = static_cast<int>(w * scaleX);
+        int height = static_cast<int>(h * scaleY);
 
         if (width <= 0 || height <= 0)
             continue;
 
         cv::Rect box(left, top, width, height);
-        box &= cv::Rect(0,0,frame.cols,frame.rows);
 
-        if(box.width <= 0 || box.height <= 0)
+        box &= cv::Rect(
+            0,
+            0,
+            frame.cols,
+            frame.rows
+        );
+
+        if (box.width <= 0 || box.height <= 0)
             continue;
 
         tempBoxes.push_back(box);
@@ -1550,7 +1578,7 @@ std::vector<cv::Rect> DeviceAgent::runDetections(
         indices
     );
 
-    for(int idx : indices)
+    for (int idx : indices)
     {
         boxes.push_back(tempBoxes[idx]);
         classIds.push_back(tempClassIds[idx]);
@@ -1559,6 +1587,7 @@ std::vector<cv::Rect> DeviceAgent::runDetections(
 
     return boxes;
 }
+
 
 } // namespace object_detection
 } // namespace stub
